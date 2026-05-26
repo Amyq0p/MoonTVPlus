@@ -102,6 +102,12 @@ interface TtsSettings {
   autoPlayNext: boolean;
 }
 
+interface TtsVoicesCache {
+  voices: BookTtsVoice[];
+  defaults?: Partial<TtsSettings>;
+  savedAt: number;
+}
+
 interface ScrolledReadingPosition {
   href: string;
   scrollTop: number;
@@ -114,7 +120,8 @@ type TtsStatus = 'idle' | 'loading' | 'playing' | 'paused' | 'error';
 
 const SETTINGS_STORAGE_KEY = 'books_epub_reader_settings';
 const SCROLLED_POSITION_STORAGE_KEY = 'books_epub_scrolled_positions';
-const TTS_SETTINGS_STORAGE_KEY = 'books_epub_tts_settings';
+const TTS_SETTINGS_STORAGE_KEY = 'books_tts_settings';
+const TTS_VOICES_STORAGE_KEY = 'books_tts_voices_cache';
 const DEFAULT_SETTINGS: ReaderSettings = {
   fontSize: 100,
   lineHeight: 1.7,
@@ -149,6 +156,38 @@ function loadTtsSettings(): TtsSettings {
   } catch {
     return DEFAULT_TTS_SETTINGS;
   }
+}
+
+function loadCachedTtsVoices(): TtsVoicesCache | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(TTS_VOICES_STORAGE_KEY);
+    if (!raw) return null;
+    const cache = JSON.parse(raw) as Partial<TtsVoicesCache>;
+    if (!Array.isArray(cache.voices) || cache.voices.length === 0) return null;
+    return {
+      voices: cache.voices,
+      defaults: cache.defaults || {},
+      savedAt: typeof cache.savedAt === 'number' ? cache.savedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedTtsVoices(cache: Omit<TtsVoicesCache, 'savedAt'>) {
+  if (typeof window === 'undefined' || cache.voices.length === 0) return;
+  localStorage.setItem(TTS_VOICES_STORAGE_KEY, JSON.stringify({ ...cache, savedAt: Date.now() }));
+}
+
+function applyTtsDefaults(settings: TtsSettings, defaults?: Partial<TtsSettings>): TtsSettings {
+  return {
+    ...settings,
+    voice: settings.voice || defaults?.voice || '',
+    rate: settings.rate || defaults?.rate || '+0%',
+    pitch: settings.pitch || defaults?.pitch || '+0Hz',
+    volume: settings.volume || defaults?.volume || '+0%',
+  };
 }
 
 function parseSignedNumber(value: string, _suffix: '%' | 'Hz') {
@@ -418,7 +457,7 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
   const [error, setError] = useState('');
   const [ttsVoices, setTtsVoices] = useState<BookTtsVoice[]>([]);
   const [ttsAvailable, setTtsAvailable] = useState(false);
-  const [ttsSettings, setTtsSettings] = useState<TtsSettings>(DEFAULT_TTS_SETTINGS);
+  const [ttsSettings, setTtsSettings] = useState<TtsSettings>(() => loadTtsSettings());
   const [ttsStatus, setTtsStatus] = useState<TtsStatus>('idle');
   const [ttsError, setTtsError] = useState('');
   const [ttsChunks, setTtsChunks] = useState<TtsChunk[]>([]);
@@ -451,7 +490,6 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
 
   useEffect(() => {
     setSettings(loadReaderSettings());
-    setTtsSettings(loadTtsSettings());
   }, []);
 
   useEffect(() => {
@@ -504,6 +542,13 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
   }, []);
 
   useEffect(() => {
+    const cachedVoices = loadCachedTtsVoices();
+    if (cachedVoices) {
+      setTtsAvailable(true);
+      setTtsVoices(cachedVoices.voices);
+      setTtsSettings((prev) => applyTtsDefaults(prev, cachedVoices.defaults));
+      return;
+    }
     let cancelled = false;
     fetch('/api/books/tts/voices')
       .then(async (res) => {
@@ -512,7 +557,8 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
         if (cancelled) return;
         setTtsAvailable(true);
         setTtsVoices(json.voices || []);
-        setTtsSettings((prev) => ({ ...prev, voice: prev.voice || json.defaults?.voice || '' }));
+        setTtsSettings((prev) => applyTtsDefaults(prev, json.defaults));
+        saveCachedTtsVoices({ voices: json.voices || [], defaults: json.defaults || {} });
       })
       .catch((err) => {
         if (!cancelled) {
@@ -935,7 +981,7 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
             <div className='px-3 py-2.5'><div className='flex items-center gap-2'><button type='button' onClick={() => void toggleTtsPlayback()} disabled={!ttsAvailable || ttsLoadingChunkIndex !== null} className='flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-sky-600 text-white disabled:opacity-50'>{ttsLoadingChunkIndex !== null ? <Loader2 className='h-4 w-4 animate-spin' /> : ttsStatus === 'playing' ? <Pause className='h-4 w-4' /> : <Play className='h-4 w-4' />}</button><div className='min-w-0 flex-1'><div className='truncate text-sm font-medium text-gray-900 dark:text-gray-100'>{currentChapterTitle || '语音朗读'}</div><div className='mt-0.5 flex items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400'><span>{!ttsAvailable ? '服务异常' : ttsStatus === 'playing' ? '正在播放' : ttsStatus === 'paused' ? '已暂停' : ttsLoadingChunkIndex !== null ? '生成语音中...' : '待播放'}</span>{ttsChunks.length > 0 ? <span>{ttsCurrentChunkIndex + 1}/{ttsChunks.length}</span> : null}</div></div><button type='button' onClick={() => setTtsPanelOpen((prev) => !prev)} className='flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-200'><ChevronUp className={`h-4 w-4 transition-transform ${ttsPanelOpen ? 'rotate-180' : ''}`} /></button></div><div className='mt-2 flex items-center justify-between text-[11px] text-gray-400'><span>{selectedVoice?.displayName || '默认音色'}</span><span>{formatDurationTime(displayedTtsTime)} / {formatDurationTime(ttsDuration || 0)}</span></div></div>
           </div>
         </div>
-        {ttsPanelOpen ? <div className='absolute inset-x-0 bottom-20 z-30 mx-auto w-[min(94vw,34rem)]'><div className='rounded-[2rem] border border-gray-200 bg-white/98 p-4 shadow-2xl backdrop-blur dark:border-gray-800 dark:bg-gray-950/98'><div className='mb-3 flex items-center justify-between'><div className='flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100'><Headphones className='h-4 w-4 text-sky-500' />听书控制</div><button type='button' onClick={() => setTtsPanelOpen(false)} className='flex h-8 w-8 items-center justify-center rounded-full bg-gray-100 text-gray-600 dark:bg-gray-900 dark:text-gray-300'><X className='h-4 w-4' /></button></div><div className='mb-4 flex items-center justify-between rounded-2xl bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-gray-900 dark:text-gray-300'><span className='truncate'>{currentChunk?.text.slice(0, 28) || '当前章节可开始朗读'}</span><span className='ml-2 shrink-0'>{Math.round(ttsChunkPercent)}%</span></div><select value={ttsSettings.voice} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, voice: e.target.value })); }} className='mb-4 w-full rounded-2xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100'>{ttsVoices.map((voice) => <option key={voice.shortName} value={voice.shortName}>{voice.displayName || voice.shortName}</option>)}</select><label className='mb-3 block text-xs text-gray-500'>语速 {ttsSettings.rate}<input type='range' min={0} max={TTS_RATE_STEPS.length - 1} step={1} value={Math.max(0, TTS_RATE_STEPS.indexOf(ttsRateValue))} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, rate: formatSignedValue(TTS_RATE_STEPS[Number(e.target.value)] ?? 0, '%') })); }} className='w-full' /></label><label className='mb-3 block text-xs text-gray-500'>音调 {ttsSettings.pitch}<input type='range' min={0} max={TTS_PITCH_STEPS.length - 1} step={1} value={Math.max(0, TTS_PITCH_STEPS.indexOf(ttsPitchValue))} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, pitch: formatSignedValue(TTS_PITCH_STEPS[Number(e.target.value)] ?? 0, 'Hz') })); }} className='w-full' /></label><label className='block text-xs text-gray-500'>音量 {ttsSettings.volume}<input type='range' min={0} max={TTS_VOLUME_STEPS.length - 1} step={1} value={Math.max(0, TTS_VOLUME_STEPS.indexOf(ttsVolumeValue))} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, volume: formatSignedValue(TTS_VOLUME_STEPS[Number(e.target.value)] ?? 0, '%') })); }} className='w-full' /></label>{ttsError ? <div className='mt-3 text-xs text-red-500'>{ttsError}</div> : null}</div></div> : null}
+        {ttsPanelOpen ? <div className='absolute inset-x-0 bottom-20 z-30 mx-auto w-[min(94vw,34rem)]'><div className='rounded-[2rem] border border-gray-200 bg-white/98 p-4 shadow-2xl backdrop-blur dark:border-gray-800 dark:bg-gray-950/98'><div className='mb-3 flex items-center justify-between'><div className='flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100'><Headphones className='h-4 w-4 text-sky-500' />听书控制</div><button type='button' onClick={() => setTtsPanelOpen(false)} className='flex h-8 w-8 items-center justify-center rounded-full bg-gray-100 text-gray-600 dark:bg-gray-900 dark:text-gray-300'><X className='h-4 w-4' /></button></div><div className='mb-4 flex items-center justify-between rounded-2xl bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-gray-900 dark:text-gray-300'><span className='truncate'>{currentChunk?.text.slice(0, 28) || '当前章节可开始朗读'}</span><span className='ml-2 shrink-0'>{Math.round(ttsChunkPercent)}%</span></div><div className='mb-4 flex items-center justify-center gap-3'><button type='button' aria-label='上一段' onClick={() => { const next = Math.max(0, ttsCurrentChunkIndex - 1); if (ttsChunks[next]) void playTtsChunk(next); }} disabled={ttsCurrentChunkIndex <= 0 || ttsChunks.length === 0} className='flex h-11 w-11 items-center justify-center rounded-full bg-gray-100 text-gray-700 disabled:opacity-40 dark:bg-gray-900 dark:text-gray-200'><SkipBack className='h-5 w-5' /></button><button type='button' onClick={() => void toggleTtsPlayback()} disabled={!ttsAvailable || ttsLoadingChunkIndex !== null} className='flex h-14 w-14 items-center justify-center rounded-full bg-sky-600 text-white shadow-lg disabled:opacity-50'>{ttsLoadingChunkIndex !== null ? <Loader2 className='h-5 w-5 animate-spin' /> : ttsStatus === 'playing' ? <Pause className='h-5 w-5' /> : <Play className='h-5 w-5' />}</button><button type='button' aria-label='下一段' onClick={() => { const next = ttsCurrentChunkIndex + 1; if (ttsChunks[next]) void playTtsChunk(next); }} disabled={ttsCurrentChunkIndex >= ttsChunks.length - 1 || ttsChunks.length === 0} className='flex h-11 w-11 items-center justify-center rounded-full bg-gray-100 text-gray-700 disabled:opacity-40 dark:bg-gray-900 dark:text-gray-200'><SkipForward className='h-5 w-5' /></button><button type='button' aria-label='停止' onClick={() => stopTts(true)} disabled={ttsStatus === 'idle' && ttsChunks.length === 0} className='flex h-11 w-11 items-center justify-center rounded-full bg-gray-100 text-gray-700 disabled:opacity-40 dark:bg-gray-900 dark:text-gray-200'><Square className='h-4 w-4' /></button></div><select value={ttsSettings.voice} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, voice: e.target.value })); }} className='mb-4 w-full rounded-2xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100'>{ttsVoices.map((voice) => <option key={voice.shortName} value={voice.shortName}>{voice.displayName || voice.shortName}</option>)}</select><label className='mb-3 block text-xs text-gray-500'>语速 {ttsSettings.rate}<input type='range' min={0} max={TTS_RATE_STEPS.length - 1} step={1} value={Math.max(0, TTS_RATE_STEPS.indexOf(ttsRateValue))} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, rate: formatSignedValue(TTS_RATE_STEPS[Number(e.target.value)] ?? 0, '%') })); }} className='w-full' /></label><label className='mb-3 block text-xs text-gray-500'>音调 {ttsSettings.pitch}<input type='range' min={0} max={TTS_PITCH_STEPS.length - 1} step={1} value={Math.max(0, TTS_PITCH_STEPS.indexOf(ttsPitchValue))} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, pitch: formatSignedValue(TTS_PITCH_STEPS[Number(e.target.value)] ?? 0, 'Hz') })); }} className='w-full' /></label><label className='block text-xs text-gray-500'>音量 {ttsSettings.volume}<input type='range' min={0} max={TTS_VOLUME_STEPS.length - 1} step={1} value={Math.max(0, TTS_VOLUME_STEPS.indexOf(ttsVolumeValue))} onChange={(e) => { stopTts(true); setTtsSettings((prev) => ({ ...prev, volume: formatSignedValue(TTS_VOLUME_STEPS[Number(e.target.value)] ?? 0, '%') })); }} className='w-full' /></label>{ttsError ? <div className='mt-3 text-xs text-red-500'>{ttsError}</div> : null}</div></div> : null}
       </> : null}
     </div>
   );
@@ -1106,7 +1152,7 @@ export default function BookReadPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
-  const [ttsSettings, setTtsSettings] = useState<TtsSettings>(DEFAULT_TTS_SETTINGS);
+  const [ttsSettings, setTtsSettings] = useState<TtsSettings>(() => loadTtsSettings());
   const [tocItems, setTocItems] = useState<TocItem[]>([]);
   const [currentHref, setCurrentHref] = useState('');
   const [currentChapter, setCurrentChapter] = useState('');
@@ -1169,7 +1215,6 @@ export default function BookReadPage() {
 
   useEffect(() => {
     setSettings(loadReaderSettings());
-    setTtsSettings(loadTtsSettings());
   }, []);
 
   useEffect(() => {
@@ -1281,6 +1326,13 @@ export default function BookReadPage() {
 
   useEffect(() => {
     if (!manifest || manifest.format !== 'epub') return;
+    const cachedVoices = loadCachedTtsVoices();
+    if (cachedVoices) {
+      setTtsAvailable(true);
+      setTtsVoices(cachedVoices.voices);
+      setTtsSettings((prev) => applyTtsDefaults(prev, cachedVoices.defaults));
+      return;
+    }
     let cancelled = false;
     fetch('/api/books/tts/voices')
       .then(async (res) => {
@@ -1289,13 +1341,8 @@ export default function BookReadPage() {
         if (cancelled) return;
         setTtsAvailable(true);
         setTtsVoices(json.voices || []);
-        setTtsSettings((prev) => ({
-          ...prev,
-          voice: prev.voice || json.defaults?.voice || '',
-          rate: prev.rate || json.defaults?.rate || '+0%',
-          pitch: prev.pitch || json.defaults?.pitch || '+0Hz',
-          volume: prev.volume || json.defaults?.volume || '+0%',
-        }));
+        setTtsSettings((prev) => applyTtsDefaults(prev, json.defaults));
+        saveCachedTtsVoices({ voices: json.voices || [], defaults: json.defaults || {} });
       })
       .catch((err) => {
         if (cancelled) return;
